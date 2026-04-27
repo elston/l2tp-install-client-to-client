@@ -462,6 +462,10 @@ HOOK_EOF
     else
         # Файл есть — проверим что он вызывает наш каталог
         if ! grep -q "${HOOK}.d" "$HOOK_FILE"; then
+            # Удаляем строку 'exit 0' если она в конце мешает
+            # (на AlmaLinux дефолтный ip-up имеет 'exit 0' посреди файла)
+            sed -i '/^exit 0$/d' "$HOOK_FILE"
+
             cat >> "$HOOK_FILE" <<HOOK_EOF
 
 # Добавлено l2tp-setup: вызов ${HOOK_DIR}/*
@@ -470,6 +474,7 @@ if [ -d "${HOOK_DIR}" ]; then
         [ -x "\$script" ] && "\$script" "\$@"
     done
 fi
+exit 0
 HOOK_EOF
             info "Дописан вызов ${HOOK_DIR}/* в $HOOK_FILE"
         fi
