@@ -437,6 +437,47 @@ chmod +x "$DOWN_SCRIPT"
 success "Маршруты настроены: $VPN_ROUTES"
 
 # ────────────────────────────────────────────────
+# /etc/ppp/ip-up и ip-down — мастер-скрипты которые вызывают ip-up.d/*
+# На RHEL pppd не вызывает ip-up.d/ автоматически, нужны эти обёртки.
+# На Ubuntu обычно уже есть — но проверим и убедимся что run-parts работает.
+# ────────────────────────────────────────────────
+for HOOK in ip-up ip-down; do
+    HOOK_FILE="/etc/ppp/${HOOK}"
+    HOOK_DIR="/etc/ppp/${HOOK}.d"
+
+    # Если файла нет — создаём с нуля
+    if [[ ! -f "$HOOK_FILE" ]]; then
+        cat > "$HOOK_FILE" <<HOOK_EOF
+#!/bin/bash
+# Master ${HOOK} — вызывает все исполняемые скрипты из ${HOOK_DIR}/
+# Создано l2tp-setup
+if [ -d "${HOOK_DIR}" ]; then
+    for script in "${HOOK_DIR}"/*; do
+        [ -x "\$script" ] && "\$script" "\$@"
+    done
+fi
+HOOK_EOF
+        chmod +x "$HOOK_FILE"
+        info "Создан $HOOK_FILE"
+    else
+        # Файл есть — проверим что он вызывает наш каталог
+        if ! grep -q "${HOOK}.d" "$HOOK_FILE"; then
+            cat >> "$HOOK_FILE" <<HOOK_EOF
+
+# Добавлено l2tp-setup: вызов ${HOOK_DIR}/*
+if [ -d "${HOOK_DIR}" ]; then
+    for script in "${HOOK_DIR}"/*; do
+        [ -x "\$script" ] && "\$script" "\$@"
+    done
+fi
+HOOK_EOF
+            info "Дописан вызов ${HOOK_DIR}/* в $HOOK_FILE"
+        fi
+    fi
+done
+success "PPP master-хуки настроены"
+
+# ────────────────────────────────────────────────
 # Управляющие команды
 # ────────────────────────────────────────────────
 header "Создание управляющих команд"
