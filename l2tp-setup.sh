@@ -180,8 +180,15 @@ if [[ "$MODE" == "uninstall" ]]; then
     rm -f "/etc/ppp/ip-down.d/${VPN_NAME}-routes"
 
     info "Удаляем управляющие команды..."
-    rm -f /usr/local/bin/vpn-up /usr/local/bin/vpn-down /usr/local/bin/vpn-status
-    rm -f /usr/bin/vpn-up /usr/bin/vpn-down /usr/bin/vpn-status
+    rm -f /usr/local/bin/vpn-up /usr/local/bin/vpn-down /usr/local/bin/vpn-status /usr/local/bin/vpn-watchdog
+    rm -f /usr/bin/vpn-up /usr/bin/vpn-down /usr/bin/vpn-status /usr/bin/vpn-watchdog
+
+    # Watchdog
+    systemctl stop vpn-watchdog 2>/dev/null || true
+    systemctl disable vpn-watchdog 2>/dev/null || true
+    rm -f /etc/systemd/system/vpn-watchdog.service
+    systemctl daemon-reload 2>/dev/null || true
+    rm -f /var/log/vpn-watchdog.log
 
     # Автозагрузка kernel-модуля (только для RHEL)
     rm -f /etc/modules-load.d/l2tp.conf
@@ -616,6 +623,92 @@ chmod +x "$BIN_DIR/vpn-status"
 success "Команды созданы в $BIN_DIR: vpn-up, vpn-down, vpn-status"
 
 # ────────────────────────────────────────────────
+# Watchdog — следит за ppp0 и переподнимает VPN при отвале
+# ────────────────────────────────────────────────
+header "Создание watchdog для авто-переподключения"
+
+WATCHDOG_SCRIPT="${BIN_DIR}/vpn-watchdog"
+cat > "$WATCHDOG_SCRIPT" <<CMD_EOF
+#!/bin/bash
+# L2TP VPN Watchdog
+# 1. Шлёт keepalive пинги через туннель — держит xl2tpd "занятым"
+# 2. Если 5 пингов подряд провалились — считает туннель мёртвым и переподключает
+# 3. Параллельно проверяет существование ppp0
+VPN_NAME="${VPN_NAME}"
+LOG_TAG="vpn-watchdog"
+PING_TARGET=""           # peer IP, определяется автоматически
+FAIL_COUNT=0
+MAX_FAILS=5              # сколько провальных пингов = реконнект
+
+reconnect() {
+    logger -t "\$LOG_TAG" "Переподключение VPN..."
+    echo "d \$VPN_NAME" > /var/run/xl2tpd/l2tp-control 2>/dev/null || true
+    sleep 2
+    systemctl restart xl2tpd 2>/dev/null
+    sleep 2
+    ${BIN_DIR}/vpn-up >> /var/log/vpn-watchdog.log 2>&1
+    FAIL_COUNT=0
+    PING_TARGET=""
+    sleep 15
+}
+
+while true; do
+    # ppp0 не существует — поднимаем
+    if ! ip link show ppp0 &>/dev/null; then
+        logger -t "\$LOG_TAG" "ppp0 отсутствует — поднимаем VPN"
+        reconnect
+        continue
+    fi
+
+    # Определить peer для пинга если ещё не знаем
+    if [[ -z "\$PING_TARGET" ]]; then
+        PING_TARGET=\$(ip -4 addr show ppp0 2>/dev/null | grep -oP 'peer \K[\d.]+' | head -1)
+        if [[ -z "\$PING_TARGET" ]]; then
+            sleep 5
+            continue
+        fi
+        logger -t "\$LOG_TAG" "Watchdog мониторит \$PING_TARGET через ppp0"
+    fi
+
+    # Пинг через туннель — держит трафик и проверяет связность
+    if ping -c 1 -W 3 -I ppp0 "\$PING_TARGET" &>/dev/null; then
+        FAIL_COUNT=0
+    else
+        FAIL_COUNT=\$((FAIL_COUNT + 1))
+        logger -t "\$LOG_TAG" "Пинг \$PING_TARGET провален (\$FAIL_COUNT/\$MAX_FAILS)"
+        if [[ \$FAIL_COUNT -ge \$MAX_FAILS ]]; then
+            logger -t "\$LOG_TAG" "\$MAX_FAILS пингов подряд провалились — туннель мёртв"
+            reconnect
+            continue
+        fi
+    fi
+
+    sleep 10
+done
+CMD_EOF
+chmod +x "$WATCHDOG_SCRIPT"
+
+# Systemd сервис для watchdog
+cat > "/etc/systemd/system/vpn-watchdog.service" <<EOF
+[Unit]
+Description=L2TP VPN Watchdog (auto-reconnect ${VPN_NAME})
+After=network-online.target ${STRONGSWAN_SERVICE}.service xl2tpd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${WATCHDOG_SCRIPT}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+success "Watchdog создан: vpn-watchdog.service (для запуска: systemctl start vpn-watchdog)"
+
+# ────────────────────────────────────────────────
 # Маркер для uninstall
 # ────────────────────────────────────────────────
 mkdir -p "$MARKER_DIR"
@@ -652,6 +745,7 @@ echo
 echo -e "  ${BOLD}Подключиться:${NC}    vpn-up"
 echo -e "  ${BOLD}Отключиться:${NC}     vpn-down"
 echo -e "  ${BOLD}Статус:${NC}          vpn-status"
+echo -e "  ${BOLD}Авто-реконнект:${NC}  systemctl enable --now vpn-watchdog"
 echo -e "  ${BOLD}Удалить всё:${NC}     sudo $0 uninstall"
 echo
 echo -e "  ${BOLD}Маршруты через VPN:${NC}"
