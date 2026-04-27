@@ -380,11 +380,17 @@ refuse-eap
 require-mschap-v2
 noccp
 noauth
-idle 1800
 mtu 1410
 mru 1410
 # defaultroute  ← намеренно отключено, SSH не отвалится
 # usepeerdns    ← отключено, системный DNS не меняется
+# Keepalive — без этого PPP отваливается по тишине
+lcp-echo-interval 30
+lcp-echo-failure 4
+# Авто-переподключение при разрыве
+persist
+maxfail 0
+holdoff 10
 debug
 connect-delay 5000
 name ${VPN_USER}
